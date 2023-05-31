@@ -17,7 +17,8 @@ public struct GeoFeature : BaseShape
         Desert,
         Unknown,
         Water,
-        Residential
+        Residential,
+        Leisure
     }
 
     public int ZIndex
@@ -41,6 +42,7 @@ public struct GeoFeature : BaseShape
                 case GeoFeatureType.Water:
                     return 40;
                 case GeoFeatureType.Residential:
+                case GeoFeatureType.Leisure:
                     return 41;
             }
 
@@ -82,15 +84,24 @@ public struct GeoFeature : BaseShape
             case GeoFeatureType.Residential:
                 color = Color.LightCoral;
                 break;
+            case GeoFeatureType.Leisure:
+                color = Color.LightGreen;
+                break;
         }
 
-        if (!IsPolygon)
+		if (!IsPolygon)
         {
             var pen = new Pen(color, 1.2f);
             context.DrawLines(pen, ScreenCoordinates);
         }
+        else if (Type == GeoFeatureType.Leisure)
+        {
+            context.DrawPolygon(new Pen(color, 1.2f), ScreenCoordinates);
+            context.FillPolygon(color.WithAlpha(0.2f), ScreenCoordinates);
+        }
         else
         {
+            // TODO: Explore .WithAlpha
             context.FillPolygon(color, ScreenCoordinates);
         }
     }
@@ -99,50 +110,6 @@ public struct GeoFeature : BaseShape
     {
         IsPolygon = true;
         Type = type;
-        ScreenCoordinates = new PointF[c.Length];
-        for (var i = 0; i < c.Length; i++)
-            ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
-                (float)MercatorProjection.latToY(c[i].Latitude));
-    }
-
-    public GeoFeature(ReadOnlySpan<Coordinate> c, MapFeatureData feature)
-    {
-        IsPolygon = feature.Type == GeometryType.Polygon;
-        var naturalKey = feature.Properties.FirstOrDefault(x => x.Key == "natural").Value;
-        Type = GeoFeatureType.Unknown;
-        if (naturalKey != null)
-        {
-            if (naturalKey == "fell" ||
-                naturalKey == "grassland" ||
-                naturalKey == "heath" ||
-                naturalKey == "moor" ||
-                naturalKey == "scrub" ||
-                naturalKey == "wetland")
-            {
-                Type = GeoFeatureType.Plain;
-            }
-            else if (naturalKey == "wood" ||
-                     naturalKey == "tree_row")
-            {
-                Type = GeoFeatureType.Forest;
-            }
-            else if (naturalKey == "bare_rock" ||
-                     naturalKey == "rock" ||
-                     naturalKey == "scree")
-            {
-                Type = GeoFeatureType.Mountains;
-            }
-            else if (naturalKey == "beach" ||
-                     naturalKey == "sand")
-            {
-                Type = GeoFeatureType.Desert;
-            }
-            else if (naturalKey == "water")
-            {
-                Type = GeoFeatureType.Water;
-            }
-        }
-
         ScreenCoordinates = new PointF[c.Length];
         for (var i = 0; i < c.Length; i++)
             ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
@@ -202,7 +169,6 @@ public struct PopulatedPlace : BaseShape
         for (var i = 0; i < c.Length; i++)
             ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
                 (float)MercatorProjection.latToY(c[i].Latitude));
-        var name = feature.Properties.FirstOrDefault(x => x.Key == "name").Value;
 
         if (feature.Label.IsEmpty)
         {
@@ -211,28 +177,9 @@ public struct PopulatedPlace : BaseShape
         }
         else
         {
-            Name = string.IsNullOrWhiteSpace(name) ? feature.Label.ToString() : name;
+            Name = feature.Label.ToString();
             ShouldRender = true;
         }
-    }
-
-    public static bool ShouldBePopulatedPlace(MapFeatureData feature)
-    {
-        // https://wiki.openstreetmap.org/wiki/Key:place
-        if (feature.Type != GeometryType.Point)
-        {
-            return false;
-        }
-        foreach (var entry in feature.Properties)
-            if (entry.Key.StartsWith("place"))
-            {
-                if (entry.Value.StartsWith("city") || entry.Value.StartsWith("town") ||
-                    entry.Value.StartsWith("locality") || entry.Value.StartsWith("hamlet"))
-                {
-                    return true;
-                }
-            }
-        return false;
     }
 }
 
@@ -255,30 +202,6 @@ public struct Border : BaseShape
         for (var i = 0; i < c.Length; i++)
             ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
                 (float)MercatorProjection.latToY(c[i].Latitude));
-    }
-
-    public static bool ShouldBeBorder(MapFeatureData feature)
-    {
-        // https://wiki.openstreetmap.org/wiki/Key:admin_level
-        var foundBoundary = false;
-        var foundLevel = false;
-        foreach (var entry in feature.Properties)
-        {
-            if (entry.Key.StartsWith("boundary") && entry.Value.StartsWith("administrative"))
-            {
-                foundBoundary = true;
-            }
-            if (entry.Key.StartsWith("admin_level") && entry.Value == "2")
-            {
-                foundLevel = true;
-            }
-            if (foundBoundary && foundLevel)
-            {
-                break;
-            }
-        }
-
-        return foundBoundary && foundLevel;
     }
 }
 
@@ -311,26 +234,81 @@ public struct Waterway : BaseShape
     }
 }
 
+public enum RoadType {
+    Unknown,
+    Motorway,
+    Trunk,
+    Primary,
+    Secondary,
+    Tertiary,
+    Residential,
+    Track,
+}
+
 public struct Road : BaseShape
 {
     public int ZIndex { get; set; } = 50;
     public bool IsPolygon { get; set; }
     public PointF[] ScreenCoordinates { get; set; }
+    public RoadType Type { get; set; }
 
-    public void Render(IImageProcessingContext context)
+	public void Render(IImageProcessingContext context)
     {
         if (!IsPolygon)
         {
-            var pen = new Pen(Color.Coral, 2.0f);
-            var pen2 = new Pen(Color.Yellow, 2.2f);
-            context.DrawLines(pen2, ScreenCoordinates);
-            context.DrawLines(pen, ScreenCoordinates);
+            Pen fgPen;
+            Pen bgPen;
+            switch (Type) {
+                case RoadType.Motorway: {
+                    fgPen = new Pen(Color.DarkRed, 2.0f);                                         
+                    bgPen = new Pen(Color.Yellow, 2.2f);
+                    break;
+                }
+                case RoadType.Trunk: {
+                    fgPen = new Pen(Color.Red, 1.8f);                                         
+                    bgPen = new Pen(Color.Yellow, 2.0f);
+                    break;
+                }
+                case RoadType.Primary: {
+                    fgPen = new Pen(Color.Orange, 1.8f);                                         
+                    bgPen = new Pen(Color.Yellow, 2.0f);
+                    break;
+                }
+                case RoadType.Secondary: {
+                    fgPen = new Pen(Color.Yellow, 1.6f);                                         
+                    bgPen = new Pen(Color.Yellow, 1.8f);
+                    break;
+                }
+                case RoadType.Tertiary: {
+                    fgPen = new Pen(Color.White, 1.6f);                                         
+                    bgPen = new Pen(Color.DarkGray, 1.8f);
+                    break;
+                }
+                case RoadType.Residential: {
+                    fgPen = new Pen(Color.White, 1.5f);                                         
+                    bgPen = new Pen(Color.DarkGray, 1.6f);
+                    break;
+                }
+                case RoadType.Track: {
+                    fgPen = new Pen(Color.RosyBrown, 1.4f);                                         
+                    bgPen = new Pen(Color.Brown, 1.5f);
+                    break;
+                }
+                default: {
+                    fgPen = new Pen(Color.Coral, 0.2f);                                         
+                    bgPen = new Pen(Color.Yellow, 0.4f);
+                    break;
+                }
+            }    
+            context.DrawLines(bgPen, ScreenCoordinates);
+            context.DrawLines(fgPen, ScreenCoordinates);
         }
     }
 
-    public Road(ReadOnlySpan<Coordinate> c, bool isPolygon = false)
+    public Road(ReadOnlySpan<Coordinate> c, RoadType type = RoadType.Unknown, bool isPolygon = false)
     {
-        IsPolygon = isPolygon;
+		Type = type;
+		IsPolygon = isPolygon;
         ScreenCoordinates = new PointF[c.Length];
         for (var i = 0; i < c.Length; i++)
             ScreenCoordinates[i] = new PointF((float)MercatorProjection.lonToX(c[i].Longitude),
